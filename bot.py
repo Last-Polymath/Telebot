@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # --- Configuration ---
 # Get your bot token from environment variables for security
-TOKEN = os.environ.get("8051480351:AAEVeFG1ch9ZW-bJTgaAAWspUh646LsrnSI", "8051480351:AAEVeFG1ch9ZW-bJTgaAAWspUh646LsrnSI") # Fallback for local testing
+TOKEN = os.environ.get("Your_token", "your_token") # Fallback for local testing
 
 # Enable logging
 logging.basicConfig(
