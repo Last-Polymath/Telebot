@@ -7,6 +7,8 @@ from telegram.helpers import escape_markdown
 
 # --- Configuration ---
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN") 
+# Path to the cookie file on the Raspberry Pi
+COOKIE_FILE_PATH = "/home/pi/Telebot/instagram_cookies.txt"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -16,131 +18,133 @@ logger = logging.getLogger(__name__)
 # --- Command Handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a welcome message."""
     user = update.effective_user
     await update.message.reply_html(
         rf"Hi {user.mention_html()}! 👋",
         f"I am your personal media downloader bot.\n\n"
-        f"Just send me any link from a supported website, and I'll ask you what quality you want to download.\n\n"
-        f"Powered by yt-dlp."
+        f"I can download from many sites, including Instagram stories (if you've set me up with cookies!).\n\n"
+        f"Just send me a link."
     )
 
 # --- Message and Callback Handlers ---
 
 async def ask_for_quality(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Receives a link and asks the user for the desired quality with inline buttons."""
     url = update.message.text
     if not (url.startswith('http://') or url.startswith('https://')):
         await update.message.reply_text("Please send a valid link.")
         return
 
-    # Create the inline keyboard buttons
     keyboard = [
         [InlineKeyboardButton("📹 Highest Video", callback_data=f"video|{url}")],
         [InlineKeyboardButton("🎵 Highest Audio (MP3)", callback_data=f"audio|{url}")],
     ]
+    # Add a special button for Instagram profile links to fetch stories
+    if "instagram.com/" in url and "/p/" not in url and "/reel/" not in url:
+        keyboard.append([InlineKeyboardButton("📖 Instagram Stories", callback_data=f"stories|{url}")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text('What quality would you like to download?', reply_markup=reply_markup)
+    await update.message.reply_text('What would you like to download?', reply_markup=reply_markup)
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Parses the CallbackQuery and starts the download."""
     query = update.callback_query
-    await query.answer() # Acknowledge the button press
+    await query.answer()
 
-    # The callback_data is in the format "action|url"
     action, url = query.data.split('|', 1)
-
-    is_video = (action == 'video')
     
-    # Let the user know the process has started
     await query.edit_message_text(text=f"Request received! Starting download for {action}...")
     
-    await process_download(update, context, url, is_video, query.message)
+    await process_download(update, context, url, action, query.message)
 
 # --- Core Download Logic ---
 
-async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, is_video: bool, original_message) -> None:
-    """Unified function to process downloads."""
+async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, action: str, original_message) -> None:
     try:
-        if not os.path.exists('downloads'):
-            os.makedirs('downloads')
+        downloads_dir = 'downloads'
+        if not os.path.exists(downloads_dir):
+            os.makedirs(downloads_dir)
 
         ydl_opts = {
-            'outtmpl': 'downloads/%(title)s.%(ext)s',
-            'noplaylist': True,
-            'max_filesize': 50 * 1024 * 1024, # 50MB Telegram limit
+            'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
+            'max_filesize': 50 * 1024 * 1024,
             'logger': logger,
             'progress_hooks': [lambda d: None],
         }
 
-        if is_video:
-            # We no longer restrict resolution, but yt-dlp will pick the best single file < 50MB
+        # Add cookies if the file exists, essential for Instagram
+        if os.path.exists(COOKIE_FILE_PATH):
+            ydl_opts['cookiefile'] = COOKIE_FILE_PATH
+
+        if action == 'video':
             ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-        else: # Audio
+            ydl_opts['noplaylist'] = True
+        elif action == 'audio':
             ydl_opts['format'] = 'bestaudio/best'
-            ydl_opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }]
+            ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
             ydl_opts['keepvideo'] = False
+            ydl_opts['noplaylist'] = True
+        elif action == 'stories':
+            # For stories, we want the whole playlist of stories
+            ydl_opts['format'] = 'best'
+            ydl_opts['noplaylist'] = False # This is key for stories
         
+        downloaded_files = []
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            await original_message.edit_text("📥 Downloading & Converting, please wait...")
+            await original_message.edit_text("📥 Downloading, please wait...")
             info = ydl.extract_info(url, download=True)
             
-            base_filename, _ = os.path.splitext(ydl.prepare_filename(info))
-            final_ext = 'mp3' if not is_video else info.get('ext', 'mp4')
-            filename = f"{base_filename}.{final_ext}"
+            # Handle single files vs playlists (like stories)
+            if 'entries' in info:
+                # Playlist or multiple items
+                for entry in info['entries']:
+                    filename = ydl.prepare_filename(entry)
+                    downloaded_files.append(filename)
+            else:
+                # Single file
+                filename = ydl.prepare_filename(info)
+                downloaded_files.append(filename)
 
-        if not os.path.exists(filename):
-            raise FileNotFoundError("Could not find the final downloaded file.")
+        await original_message.edit_text(f"Downloaded {len(downloaded_files)} item(s). Now uploading...")
 
-        await original_message.edit_text("⬆️ Uploading to Telegram...")
+        for i, filename in enumerate(downloaded_files):
+            if not os.path.exists(filename):
+                logger.warning(f"File not found after download: {filename}")
+                continue
+            
+            await original_message.edit_text(f"⬆️ Uploading item {i+1} of {len(downloaded_files)}...")
+            
+            # Check if it's a video or photo to use the correct sender
+            if filename.endswith(('.mp4', '.mov', '.webm')):
+                 await context.bot.send_video(chat_id=update.effective_chat.id, video=open(filename, 'rb'), write_timeout=120)
+            elif filename.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                 await context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(filename, 'rb'))
+            else: # Send as a document for any other type (like mp3)
+                 await context.bot.send_document(chat_id=update.effective_chat.id, document=open(filename, 'rb'))
 
-        caption = info.get('title', 'Downloaded Media')
-        if is_video:
-            await context.bot.send_video(chat_id=update.effective_chat.id, video=open(filename, 'rb'), caption=caption, write_timeout=120)
-        else:
-            await context.bot.send_audio(chat_id=update.effective_chat.id, audio=open(filename, 'rb'), title=caption, performer=info.get('uploader', ''), write_timeout=120)
-        
-        os.remove(filename)
+            os.remove(filename)
+
         await original_message.delete()
 
-    except yt_dlp.utils.DownloadError as e:
-        error_message = str(e).split(': ERROR: ')[-1]
-        logger.error(f"Download error for URL {url}: {error_message}")
-        await original_message.edit_text(
-            f"Sorry, I couldn't download from that link.\n\n*Reason:* `{escape_markdown(error_message, version=2)}`",
-            parse_mode='MarkdownV2'
-        )
     except Exception as e:
-        logger.error(f"An unexpected error occurred for URL {url}: {e}")
-        await original_message.edit_text(f"An unexpected error occurred: {e}")
+        error_message = str(e)
+        logger.error(f"An error occurred for URL {url}: {error_message}")
+        await original_message.edit_text(f"An error occurred: {escape_markdown(error_message, version=2)}", parse_mode='MarkdownV2')
+
 
 # --- Main Bot Runner ---
 
 def main() -> None:
-    """Start the bot."""
     if TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
-        logger.error("!!! BOT TOKEN NOT SET! Please set your bot token in the code or as an environment variable. !!!")
+        logger.error("!!! BOT TOKEN NOT SET !!!")
         return
 
     application = Application.builder().token(TOKEN).build()
-
-    # --- Add Handlers ---
     application.add_handler(CommandHandler("start", start))
-    
-    # Handles any link sent to the bot
     link_filter = filters.TEXT & ~filters.COMMAND & (filters.Regex(r'http[s]?://'))
     application.add_handler(MessageHandler(link_filter, ask_for_quality))
-
-    # Handles button clicks
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    logger.info("Bot is starting with interactive quality selection...")
+    logger.info("Bot is starting...")
     application.run_polling()
 
 if __name__ == "__main__":
