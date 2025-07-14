@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # --- Configuration ---
 # Get your bot token from environment variables for security
-TOKEN = os.environ.get("8051480351:AAEVeFG1ch9ZW-bJTgaAAWspUh646LsrnSI", "8051480351:AAEVeFG1ch9ZW-bJTgaAAWspUh646LsrnSI") # Fallback for local testing
+TOKEN = os.environ.get("7136286649:AAEcL6C2OcURC26hLQEiBSA0GExpDoLgA8w", "7136286649:AAEcL6C2OcURC26hLQEiBSA0GExpDoLgA8w") # Fallback for local testing
 
 # Enable logging
 logging.basicConfig(
@@ -59,20 +59,23 @@ async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, i
 
         # --- yt-dlp Configuration ---
         if is_video:
+            # --- KEY CHANGES FOR VIDEO ---
+            # 1. Format is set to download the best possible video and audio streams and merge them.
+            # 2. 'max_filesize' is removed to allow downloading files of any size.
             ydl_opts = {
-                'format': 'best[ext=mp4][height<=720]/best[ext=mp4]/best',
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
                 'outtmpl': 'downloads/%(title)s.%(ext)s',
                 'noplaylist': True,
-                'max_filesize': 50 * 1024 * 1024, # 50MB
                 'logger': logger,
                 'progress_hooks': [lambda d: None],
+                'merge_output_format': 'mp4', # Ensures the final merged file is an MP4
             }
-        else: # Audio options
+        else: # Audio options remain the same
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'outtmpl': 'downloads/%(title)s.%(ext)s',
                 'noplaylist': True,
-                'max_filesize': 50 * 1024 * 1024, # 50MB
+                'max_filesize': 50 * 1024 * 1024, # 50MB limit is fine for audio
                 'logger': logger,
                 'progress_hooks': [lambda d: None],
                 'postprocessors': [{
@@ -85,15 +88,15 @@ async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, i
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             await message.edit_text("📥 Downloading, please wait...")
             info = ydl.extract_info(url, download=True)
-            # The filename after post-processing might change (e.g., .webm to .mp3)
-            # So, we build the expected path.
+            
             base_filename = ydl.prepare_filename(info).rsplit('.', 1)[0]
-            expected_ext = 'mp3' if not is_video else info.get('ext')
+            # Set expected extension based on the processing type
+            expected_ext = 'mp4' if is_video else 'mp3'
             filename = f"{base_filename}.{expected_ext}"
         
-        # Check if the file exists, sometimes post-processing fails silently
+        # Check if the file exists, as errors can sometimes be silent
         if not os.path.exists(filename):
-             raise FileNotFoundError("Could not find the final downloaded file. It might have been too large or an error occurred during conversion.")
+             raise FileNotFoundError("Could not find the final downloaded file. An error might have occurred during conversion.")
 
         await message.edit_text("⬆️ Uploading to Telegram...")
 
@@ -109,7 +112,7 @@ async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, i
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"Download error for URL {url}: {e}")
         await message.edit_text(
-            f"Sorry, I couldn't download from that link. It might be unsupported, private, or the file is too large (>50MB).\n\n"
+            f"Sorry, I couldn't download from that link. It might be unsupported, private, or too large for Telegram to handle.\n\n"
         )
     except Exception as e:
         logger.error(f"An unexpected error occurred for URL {url}: {e}")
@@ -119,7 +122,7 @@ async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, i
 
 def main() -> None:
     """Start the bot."""
-    if TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
+    if TOKEN == "YOUR_TELEGRAM_BOT_TOKEN": # Generic check for a placeholder token
         logger.error("!!! BOT TOKEN NOT SET! Please set your bot token in the code or as an environment variable. !!!")
         return
 
